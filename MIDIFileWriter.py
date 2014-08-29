@@ -1,12 +1,21 @@
 import struct
 class MIDIFileWriter:
     __file = None
+    __track_chunk_buffer = None
+    __time_division = 960
+    __big_endian = 1  #midi file is big-endian
 
     def __init__(self, file):
         if type(file) == str:
             self.__file = open(file, "wb+")
         else:
             self.__file = file
+
+    def setTimeDivision(self, time):
+        self.__time_division = time
+
+    def setBigEndian(self, val):
+        self.__big_endian = val
 
     @staticmethod
     def valueBytes(val, length):
@@ -25,6 +34,7 @@ class MIDIFileWriter:
         while(l<length):
             bytes.append(0)
             l += 1
+        bytes.reverse()
         return bytes;
 
     @staticmethod
@@ -45,7 +55,11 @@ class MIDIFileWriter:
             bytes.append(val)
         elif not flag:
             bytes.append(val)
+        bytes.reverse()
         return bytes
+
+    def createTrackChunkBuffer(self):
+        self.__track_chunk_buffer = bytearray()
 
     def writeBytes(self, bytes):
         self.__file.write(bytes)
@@ -58,7 +72,7 @@ class MIDIFileWriter:
         bytes = MIDIFileWriter.valLenValueBytes(val)
         self.writeBytes(bytes)
 
-    def writeHeaderChunk(self, formatType, tracks, timeDivision):
+    def writeHeaderChunk(self, formatType, tracks, timeDivision = 0):
         if formatType not in range(0, 3):
             print "unknown format type\n"
             exit()
@@ -66,6 +80,8 @@ class MIDIFileWriter:
         self.writeValue(6, 4)    #Chunk size
         self.writeValue(formatType, 2)  #format type
         self.writeValue(tracks, 2)      #number of tracks
+        if timeDivision == 0:
+            timeDivision = self.__time_division
         self.writeValue(timeDivision, 2)  #time division
 
     def writeTrackChunk(self, size, eventData):
@@ -74,24 +90,55 @@ class MIDIFileWriter:
         self.writeBytes(eventData); #tarck event data
 
     def pushMTrkEvent(self, deltaTime, event):
-        pass
+        self.__track_chunk_buffer.extend(self.valLenValueBytes(deltaTime))
+        self.__track_chunk_buffer.extend(event)
 
     @staticmethod
     def midiEventBytes(type, channel, para1, para2):
-        val = type | (channel<<4)
-        val |= para1 << 8
-        val |= para2 << 16
-        return MIDIFileWriter.valueBytes(val, 3)
+        bytes = bytearray()
+        val = channel | (type<<4)  #big endian
+        bytes.append(val)
+        bytes.append(para1)
+        if para2 is not None:
+            bytes.append(para2)
+        return bytes
 
     @staticmethod
     def sysexEventBytes(type, length, data):
         bytes = bytearray()
         bytes.append(type)
-        bytes.append(MIDIFileWriter.valLenValueBytes(length))
-        bytes.append(data)
+        bytes.extend(MIDIFileWriter.valLenValueBytes(length))
+        bytes.extend(data)
         return bytes
 
     @staticmethod
     def metaEventBytes(type, length, data):
-        pass
+        bytes = bytearray()
+        bytes.append(0xFF)
+        bytes.append(type)
+        bytes.extend(MIDIFileWriter.valLenValueBytes(length))
+        if data is not None:
+            bytes.extend(data)
+        return bytes
 
+    def pushMidiEvent(self, deltaTime, type, channel, para1, para2):
+        self.pushMTrkEvent(deltaTime, self.midiEventBytes(type, channel, para1, para2))
+
+    def pushSysexEvent(self, deltaTime, type, length, data):
+        self.pushMTrkEvent(deltaTime, self.sysexEventBytes(type, length, data))
+
+    def pushMetaEvent(self, detalTime, type, length, data):
+        self.pushMTrkEvent(detalTime, self.metaEventBytes(type, length, data))
+
+    def flushTarckChunk(self):
+        self.pushMetaEvent(0, 0x2f, 0, None)  #end of track event
+        size = len(self.__track_chunk_buffer)
+        self.writeTrackChunk(size, self.__track_chunk_buffer)
+        self.__track_chunk_buffer = None
+
+    def playNote(self, name, time=4, velocity=64, deltaTime=0, channel=0):
+        if time not in (1, 2, 4, 8, 16, 32, 64):
+            raise ValueError(time)
+        duration = self.__time_division * 4 / time
+        self.pushMidiEvent(deltaTime, 0x9, channel, name, velocity)
+        self.pushMidiEvent(duration, 0x8, channel, name, velocity)
